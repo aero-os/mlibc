@@ -464,7 +464,7 @@ int grantpt(int) {
 }
 
 double strtod_l(const char *__restrict__ nptr, char ** __restrict__ endptr, locale_t) {
-	mlibc::infoLogger() << "mlibc: strtod_l ignores locale!" << frg::endlog;
+	// mlibc::infoLogger() << "mlibc: strtod_l ignores locale!" << frg::endlog;
 	return strtod(nptr, endptr);
 }
 

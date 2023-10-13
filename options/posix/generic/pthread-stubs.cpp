@@ -297,7 +297,11 @@ int pthread_getattr_np(pthread_t thread, pthread_attr_t *attr) {
 	*attr = pthread_attr_t{};
 
 	if (!tcb->stackAddr || !tcb->stackSize) {
-		get_own_stackinfo(&attr->__mlibc_stackaddr, &attr->__mlibc_stacksize);
+		// allocate stack
+
+		attr->__mlibc_stackaddr = 0x00;
+		attr->__mlibc_stacksize = 0x20000;
+		// get_own_stackinfo(&attr->__mlibc_stackaddr, &attr->__mlibc_stacksize);
 	} else {
 		attr->__mlibc_stacksize = tcb->stackSize;
 		attr->__mlibc_stackaddr = tcb->stackAddr;
