@@ -29,7 +29,7 @@ constexpr bool logBaseAddresses = true;
 constexpr bool logRpath = false;
 constexpr bool eagerBinding = true;
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__i386__)
 constexpr inline bool tlsAboveTp = false;
 #elif defined(__aarch64__)
 constexpr inline bool tlsAboveTp = true;
@@ -179,7 +179,7 @@ SharedObject *ObjectRepository::requestObjectWithName(frg::string_view name,
 		if (path.starts_with("$ORIGIN")) {
 			frg::string_view dirname = origin->path;
 			auto lastsl = dirname.find_last('/');
-			if (lastsl != (uint64_t)-1) {
+			if (lastsl != size_t(-1)) {
 				dirname = dirname.sub_string(0, lastsl);
 			} else {
 				dirname = ".";
@@ -554,8 +554,6 @@ void ObjectRepository::_fetchFromFile(SharedObject *object, int fd) {
 // --------------------------------------------------------
 
 void ObjectRepository::_parseDynamic(SharedObject *object) {
-	static bool rpathWarned = false;
-
 	if(!object->dynamic)
 		mlibc::infoLogger() << "ldso: Object '" << object->name
 				<< "' does not have a dynamic section" << frg::endlog;
@@ -564,6 +562,8 @@ void ObjectRepository::_parseDynamic(SharedObject *object) {
 	// Fix up these offsets to addresses after the loop, since the
 	// addresses depend on the value of DT_STRTAB.
 	frg::optional<ptrdiff_t> runpath_offset;
+	/* If true, ignore the RPATH.  */
+	bool runpath_found = false;
 	frg::optional<ptrdiff_t> soname_offset;
 
 	for(size_t i = 0; object->dynamic[i].d_tag != DT_NULL; i++) {
@@ -648,12 +648,13 @@ void ObjectRepository::_parseDynamic(SharedObject *object) {
 						<< frg::endlog;
 			break;
 		case DT_RPATH:
-			if(!rpathWarned) {
-				rpathWarned = true;
-				mlibc::infoLogger() << "\e[31mrtdl: RUNPATH not preferred over RPATH properly\e[39m" << frg::endlog;
+			if (runpath_found) {
+				/* Ignore RPATH if RUNPATH was present.  */
+				break;
 			}
 			[[fallthrough]];
 		case DT_RUNPATH:
+			runpath_found = dynamic->d_tag == DT_RUNPATH;
 			runpath_offset = dynamic->d_un.d_val;
 			break;
 		case DT_INIT:
@@ -792,7 +793,28 @@ void processCopyRela(SharedObject *object, elf_rela *reloc) {
 	memcpy((void *)rel_addr, (void *)p->virtualAddress(), symbol->st_size);
 }
 
+void processCopyRel(SharedObject *object, elf_rel *reloc) {
+	auto type = ELF_R_TYPE(reloc->r_info);
+	auto symbol_index = ELF_R_SYM(reloc->r_info);
+
+	if(type != R_COPY)
+		return;
+
+	uintptr_t rel_addr = object->baseAddress + reloc->r_offset;
+
+	auto symbol = (elf_sym *)(object->baseAddress + object->symbolTableOffset
+			+ symbol_index * sizeof(elf_sym));
+	ObjectSymbol r(object, symbol);
+	frg::optional<ObjectSymbol> p = Scope::resolveGlobalOrLocal(*globalScope, object->localScope, r.getString(), object->objectRts, Scope::resolveCopy);
+	__ensure(p);
+
+	memcpy((void *)rel_addr, (void *)p->virtualAddress(), symbol->st_size);
+}
+
 void processCopyRelocations(SharedObject *object) {
+	frg::optional<uintptr_t> rel_offset;
+	frg::optional<size_t> rel_length;
+
 	frg::optional<uintptr_t> rela_offset;
 	frg::optional<size_t> rela_length;
 
@@ -800,6 +822,15 @@ void processCopyRelocations(SharedObject *object) {
 		elf_dyn *dynamic = &object->dynamic[i];
 
 		switch(dynamic->d_tag) {
+		case DT_REL:
+			rel_offset = dynamic->d_un.d_ptr;
+			break;
+		case DT_RELSZ:
+			rel_length = dynamic->d_un.d_val;
+			break;
+		case DT_RELENT:
+			__ensure(dynamic->d_un.d_val == sizeof(elf_rel));
+			break;
 		case DT_RELA:
 			rela_offset = dynamic->d_un.d_ptr;
 			break;
@@ -817,8 +848,14 @@ void processCopyRelocations(SharedObject *object) {
 			auto reloc = (elf_rela *)(object->baseAddress + *rela_offset + offset);
 			processCopyRela(object, reloc);
 		}
+	} else if(rel_offset && rel_length) {
+		for(size_t offset = 0; offset < *rel_length; offset += sizeof(elf_rel)) {
+			auto reloc = (elf_rel *)(object->baseAddress + *rel_offset + offset);
+			processCopyRel(object, reloc);
+		}
 	}else{
 		__ensure(!rela_offset && !rela_length);
+		__ensure(!rel_offset && !rel_length);
 	}
 }
 
@@ -884,7 +921,7 @@ Tcb *allocateTcb() {
 
 	// To make sure that both the TCB and TLS data are sufficiently aligned, allocate
 	// slightly more than necessary and adjust alignment afterwards.
-	size_t alignOverhead = frg::min(alignof(Tcb), tlsMaxAlignment);
+	size_t alignOverhead = frg::max(alignof(Tcb), tlsMaxAlignment);
 	size_t allocSize = tlsInitialSize + sizeof(Tcb) + alignOverhead;
 	auto allocation = reinterpret_cast<uintptr_t>(getAllocator().allocate(allocSize));
 	memset(reinterpret_cast<void *>(allocation), 0, allocSize);

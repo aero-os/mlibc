@@ -113,8 +113,7 @@ typedef void (*__sighandler) (int);
 #define SIGRTMIN 35
 #define SIGRTMAX 64
 
-// TODO: replace this by uint64_t
-typedef long sigset_t;
+typedef uint64_t sigset_t;
 
 // constants for sigprocmask()
 #define SIG_BLOCK 0
@@ -195,6 +194,28 @@ typedef struct __stack {
 #define SI_USER 0
 #define SI_KERNEL 128
 
+#if defined(__i386__)
+#define REG_GS 0
+#define REG_FS 1
+#define REG_ES 2
+#define REG_DS 3
+#define REG_EDI 4
+#define REG_ESI 5
+#define REG_EBP 6
+#define REG_ESP 7
+#define REG_EBX 8
+#define REG_EDX 9
+#define REG_ECX 10
+#define REG_EAX 11
+#define REG_TRAPNO 12
+#define REG_ERR 13
+#define REG_EIP 14
+#define REG_CS 15
+#define REG_EFL 16
+#define REG_UESP 17
+#define REG_SS 18
+#define NGREG 19
+#elif defined(__x86_64__)
 #define REG_R8 0
 #define REG_R9 1
 #define REG_R10 2
@@ -219,6 +240,7 @@ typedef struct __stack {
 #define REG_OLDMASK 21
 #define REG_CR2 22
 #define NGREG 23
+#endif
 
 struct sigevent {
 	union sigval sigev_value;
@@ -242,7 +264,7 @@ struct sigaction {
 
 // Taken from the linux kernel headers
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__i386__)
 
 struct _fpreg {
 	unsigned short significand[4];
@@ -260,6 +282,7 @@ struct _xmmreg {
 };
 
 struct _fpstate {
+#if defined(__x86_64__)
 	uint16_t cwd;
 	uint16_t swd;
 	uint16_t ftw;
@@ -271,6 +294,28 @@ struct _fpstate {
 	struct _fpxreg _st[8];
 	struct _xmmreg _xmm[16];
 	uint32_t padding[24];
+#elif defined(__i386__)
+	uint32_t cw;
+	uint32_t sw;
+	uint32_t tag;
+	uint32_t ipoff;
+	uint32_t cssel;
+	uint32_t dataoff;
+	uint32_t datasel;
+	struct _fpreg _st[8];
+	uint16_t status;
+	uint16_t magic;
+
+	// FXSR FPU
+
+	uint32_t _fxsr_env[6];
+	uint32_t mxscr;
+	uint32_t reserved;
+	struct _fpxreg _fxsr_st[8];
+	struct _xmmreg _xmm[8];
+
+	uint32_t padding2[56];
+#endif
 };
 
 typedef struct {
@@ -289,6 +334,23 @@ typedef struct __ucontext {
 
 #elif defined(__riscv) && __riscv_xlen == 64
 // Definitions from Linux kernel headers.
+
+#define NGREG 32
+
+enum {
+  REG_PC = 0,
+#define REG_PC REG_PC
+  REG_RA = 1,
+#define REG_RA REG_RA
+  REG_SP = 2,
+#define REG_SP REG_SP
+  REG_TP = 4,
+#define REG_TP REG_TP
+  REG_S0 = 8,
+#define REG_S0 REG_S0
+  REG_A0 = 10,
+#define REG_A0 REG_A0
+};
 
 struct __riscv_f_ext_state {
 	uint32_t f[32];
@@ -312,44 +374,11 @@ union __riscv_fp_state {
 	struct __riscv_q_ext_state q;
 };
 
-struct __user_regs_struct {
-	unsigned long pc;
-	unsigned long ra;
-	unsigned long sp;
-	unsigned long gp;
-	unsigned long tp;
-	unsigned long t0;
-	unsigned long t1;
-	unsigned long t2;
-	unsigned long s0;
-	unsigned long s1;
-	unsigned long a0;
-	unsigned long a1;
-	unsigned long a2;
-	unsigned long a3;
-	unsigned long a4;
-	unsigned long a5;
-	unsigned long a6;
-	unsigned long a7;
-	unsigned long s2;
-	unsigned long s3;
-	unsigned long s4;
-	unsigned long s5;
-	unsigned long s6;
-	unsigned long s7;
-	unsigned long s8;
-	unsigned long s9;
-	unsigned long s10;
-	unsigned long s11;
-	unsigned long t3;
-	unsigned long t4;
-	unsigned long t5;
-	unsigned long t6;
-};
+typedef unsigned long __riscv_mc_gp_state[NGREG];
 
-typedef struct __mcontext {
-	struct __user_regs_struct sc_regs;
-	union __riscv_fp_state sc_fpregs;
+typedef struct sigcontext {
+	__riscv_mc_gp_state gregs;
+	union __riscv_fp_state fpregs;
 } mcontext_t;
 
 typedef struct __ucontext {
@@ -362,6 +391,8 @@ typedef struct __ucontext {
 } ucontext_t;
 
 #elif defined (__aarch64__)
+
+#define NGREG 34
 
 typedef struct sigcontext {
 	uint64_t fault_address;

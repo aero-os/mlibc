@@ -729,11 +729,10 @@ int sys_tcgetattr(int fd, struct termios *attr) {
 }
 
 int sys_tcsetattr(int fd, int when, const struct termios *attr) {
-	if(when != TCSANOW)
-		mlibc::infoLogger() << "\e[35mmlibc: tcsetattr() when argument ignored\e[39m"
-				<< frg::endlog;
-	int result;
-	if(int e = sys_ioctl(fd, TCSETS, const_cast<struct termios *>(attr), &result); e)
+	if(when < TCSANOW || when > TCSAFLUSH)
+		return EINVAL;
+
+	if(int e = sys_ioctl(fd, TCSETS, const_cast<struct termios *>(attr), nullptr); e)
 		return e;
 	return 0;
 }
@@ -1825,7 +1824,9 @@ int sys_seek(int fd, off_t offset, int whence, off_t *new_offset) {
 	resp.ParseFromArray(recv_resp.data(), recv_resp.length());
 	if(resp.error() == managarm::fs::Errors::SEEK_ON_PIPE) {
 		return ESPIPE;
-	}else{
+	} else if(resp.error() == managarm::fs::Errors::ILLEGAL_ARGUMENT) {
+		return EINVAL;
+	} else {
 		__ensure(resp.error() == managarm::fs::Errors::SUCCESS);
 		*new_offset = resp.offset();
 		return 0;
@@ -2477,9 +2478,9 @@ int sys_uname(struct utsname *buf) {
 	__ensure(buf);
 	mlibc::infoLogger() << "\e[31mmlibc: uname() returns static information\e[39m" << frg::endlog;
 	strcpy(buf->sysname, "Managarm");
-	strcpy(buf->nodename, "?");
-	strcpy(buf->release, "?");
-	strcpy(buf->version, "?");
+	strcpy(buf->nodename, "managarm");
+	strcpy(buf->release, "0.0.1-rolling");
+	strcpy(buf->version, "Managarm is not Managram");
 #if defined(__x86_64__)
 	strcpy(buf->machine, "x86_64");
 #elif defined (__aarch64__)
