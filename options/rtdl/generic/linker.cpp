@@ -1,3 +1,4 @@
+#include <mlibc/arch-defs.hpp>
 #include <stdint.h>
 #include <string.h>
 
@@ -8,6 +9,7 @@ enum {
 
 
 #include <frg/manual_box.hpp>
+#include <frg/small_vector.hpp>
 #include <mlibc/allocator.hpp>
 #include <mlibc/debug.hpp>
 #include <mlibc/rtdl-sysdeps.hpp>
@@ -27,6 +29,7 @@ constexpr bool verbose = false;
 constexpr bool stillSlightlyVerbose = false;
 constexpr bool logBaseAddresses = true;
 constexpr bool logRpath = false;
+constexpr bool logLdPath = false;
 constexpr bool eagerBinding = true;
 
 #if defined(__x86_64__) || defined(__i386__)
@@ -41,6 +44,9 @@ constexpr inline bool tlsAboveTp = true;
 
 extern DebugInterface globalDebugInterface;
 extern uintptr_t __stack_chk_guard;
+
+extern frg::manual_box<frg::small_vector<frg::string_view, 4, MemoryAllocator>> libraryPaths;
+extern frg::manual_box<frg::vector<frg::string_view, MemoryAllocator>> preloads;
 
 #if MLIBC_STATIC_BUILD
 extern "C" size_t __init_array_start[];
@@ -59,23 +65,23 @@ size_t tlsMaxAlignment = 16;
 // part of the global scope is considered for symbol resolution.
 uint64_t rtsCounter = 2;
 
-void seekOrDie(int fd, int64_t offset) {
+bool trySeek(int fd, int64_t offset) {
 	off_t noff;
-	if(mlibc::sys_seek(fd, offset, SEEK_SET, &noff))
-		__ensure(!"sys_seek() failed");
+	return mlibc::sys_seek(fd, offset, SEEK_SET, &noff) == 0;
 }
 
-void readExactlyOrDie(int fd, void *data, size_t length) {
+bool tryReadExactly(int fd, void *data, size_t length) {
 	size_t offset = 0;
 	while(offset < length) {
 		ssize_t chunk;
 		if(mlibc::sys_read(fd, reinterpret_cast<char *>(data) + offset,
 				length - offset, &chunk))
-			__ensure(!"sys_read() failed");
+			return false;
 		__ensure(chunk > 0);
 		offset += chunk;
 	}
 	__ensure(offset == length);
+	return true;
 }
 
 void closeOrDie(int fd) {
@@ -152,17 +158,10 @@ SharedObject *ObjectRepository::injectStaticObject(frg::string_view name,
 	return object;
 }
 
-SharedObject *ObjectRepository::requestObjectWithName(frg::string_view name,
+frg::expected<LinkerError, SharedObject *> ObjectRepository::requestObjectWithName(frg::string_view name,
 		SharedObject *origin, Scope *localScope, bool createScope, uint64_t rts) {
 	if (auto obj = findLoadedObject(name))
 		return obj;
-
-	const char *libdirs[4] = {
-		"/lib/",
-		"/lib64/",
-		"/usr/lib/",
-		"/usr/lib64/"
-	};
 
 	auto tryToOpen = [&] (const char *path) {
 		int fd;
@@ -233,8 +232,12 @@ SharedObject *ObjectRepository::requestObjectWithName(frg::string_view name,
 	} else if (logRpath) {
 		mlibc::infoLogger() << "rtdl: no rpath set for object" << frg::endlog;
 	}
-	for(int i = 0; i < 4 && fd == -1; i++) {
-		auto path = frg::string<MemoryAllocator>{getAllocator(), libdirs[i]} + name + '\0';
+
+	for(size_t i = 0; i < libraryPaths->size() && fd == -1; i++) {
+		auto ldPath = (*libraryPaths)[i];
+		auto path = frg::string<MemoryAllocator>{getAllocator(), ldPath} + '/' + name;
+		if(logLdPath)
+			mlibc::infoLogger() << "rtdl: Trying to load " << name << " from ldpath " << ldPath << "/" << frg::endlog;
 		fd = tryToOpen(path.data());
 		if(fd >= 0) {
 			chosenPath = std::move(path);
@@ -242,7 +245,7 @@ SharedObject *ObjectRepository::requestObjectWithName(frg::string_view name,
 		}
 	}
 	if(fd == -1)
-		return nullptr;
+		return LinkerError::notFound;
 
 	if (createScope) {
 		__ensure(localScope == nullptr);
@@ -256,8 +259,12 @@ SharedObject *ObjectRepository::requestObjectWithName(frg::string_view name,
 	auto object = frg::construct<SharedObject>(getAllocator(),
 		name.data(), std::move(chosenPath), false, localScope, rts);
 
-	_fetchFromFile(object, fd);
+	auto result = _fetchFromFile(object, fd);
 	closeOrDie(fd);
+	if(!result) {
+		frg::destruct(getAllocator(), object);
+		return result.error();
+	}
 
 	_parseDynamic(object);
 
@@ -267,7 +274,7 @@ SharedObject *ObjectRepository::requestObjectWithName(frg::string_view name,
 	return object;
 }
 
-SharedObject *ObjectRepository::requestObjectAtPath(frg::string_view path,
+frg::expected<LinkerError, SharedObject *> ObjectRepository::requestObjectAtPath(frg::string_view path,
 		Scope *localScope, bool createScope, uint64_t rts) {
 	// TODO: Support SONAME correctly.
 	auto lastSlash = path.find_last('/') + 1;
@@ -293,10 +300,16 @@ SharedObject *ObjectRepository::requestObjectAtPath(frg::string_view path,
 	frg::string<MemoryAllocator> no_prefix(getAllocator(), path);
 
 	int fd;
-	if(mlibc::sys_open((no_prefix + '\0').data(), O_RDONLY, 0, &fd))
-		return nullptr; // TODO: Free the SharedObject.
-	_fetchFromFile(object, fd);
+	if(mlibc::sys_open((no_prefix + '\0').data(), O_RDONLY, 0, &fd)) {
+		frg::destruct(getAllocator(), object);
+		return LinkerError::notFound;
+	}
+	auto result = _fetchFromFile(object, fd);
 	closeOrDie(fd);
+	if(!result) {
+		frg::destruct(getAllocator(), object);
+		return result.error();
+	}
 
 	_parseDynamic(object);
 
@@ -399,23 +412,38 @@ void ObjectRepository::_fetchFromPhdrs(SharedObject *object, void *phdr_pointer,
 }
 
 
-void ObjectRepository::_fetchFromFile(SharedObject *object, int fd) {
+frg::expected<LinkerError, void> ObjectRepository::_fetchFromFile(SharedObject *object, int fd) {
 	__ensure(!object->isMainObject);
 
 	// read the elf file header
 	elf_ehdr ehdr;
-	readExactlyOrDie(fd, &ehdr, sizeof(elf_ehdr));
+	if(!tryReadExactly(fd, &ehdr, sizeof(elf_ehdr)))
+		return LinkerError::fileTooShort;
 
-	__ensure(ehdr.e_ident[0] == 0x7F
-			&& ehdr.e_ident[1] == 'E'
-			&& ehdr.e_ident[2] == 'L'
-			&& ehdr.e_ident[3] == 'F');
-	__ensure(ehdr.e_type == ET_EXEC || ehdr.e_type == ET_DYN);
+	if(ehdr.e_ident[0] != 0x7F
+			|| ehdr.e_ident[1] != 'E'
+			|| ehdr.e_ident[2] != 'L'
+			|| ehdr.e_ident[3] != 'F')
+		return LinkerError::notElf;
+
+	if((ehdr.e_type != ET_EXEC && ehdr.e_type != ET_DYN)
+			|| ehdr.e_machine != ELF_MACHINE
+			|| ehdr.e_ident[EI_CLASS] != ELF_CLASS)
+		return LinkerError::wrongElfType;
 
 	// read the elf program headers
 	auto phdr_buffer = (char *)getAllocator().allocate(ehdr.e_phnum * ehdr.e_phentsize);
-	seekOrDie(fd, ehdr.e_phoff);
-	readExactlyOrDie(fd, phdr_buffer, ehdr.e_phnum * ehdr.e_phentsize);
+	if(!phdr_buffer)
+		return LinkerError::outOfMemory;
+
+	if(!trySeek(fd, ehdr.e_phoff)) {
+		getAllocator().deallocate(phdr_buffer, ehdr.e_phnum * ehdr.e_phentsize);
+		return LinkerError::invalidProgramHeader;
+	}
+	if(!tryReadExactly(fd, phdr_buffer, ehdr.e_phnum * ehdr.e_phentsize)) {
+		getAllocator().deallocate(phdr_buffer, ehdr.e_phnum * ehdr.e_phentsize);
+		return LinkerError::invalidProgramHeader;
+	}
 
 	object->phdrPointer = phdr_buffer;
 	object->phdrCount = ehdr.e_phnum;
@@ -438,17 +466,21 @@ void ObjectRepository::_fetchFromFile(SharedObject *object, int fd) {
 
 	__ensure(!(object->baseAddress & (hugeSize - 1)));
 
+	highest_address = (highest_address + mlibc::page_size - 1) & ~(mlibc::page_size - 1);
+
 #if MLIBC_MMAP_ALLOCATE_DSO
 	void *mappedAddr = nullptr;
 
 	if (mlibc::sys_vm_map(nullptr,
 			highest_address - object->baseAddress, PROT_NONE,
 			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0, &mappedAddr)) {
-		mlibc::panicLogger() << "sys_vm_map failed when allocating address space for DSO \""
+		mlibc::infoLogger() << "sys_vm_map failed when allocating address space for DSO \""
 				<< object->name << "\""
 				<< ", base " << (void *)object->baseAddress
 				<< ", requested " << (highest_address - object->baseAddress) << " bytes"
 				<< frg::endlog;
+		getAllocator().deallocate(phdr_buffer, ehdr.e_phnum * ehdr.e_phentsize);
+		return LinkerError::outOfMemory;
 	}
 
 	object->baseAddress = reinterpret_cast<uintptr_t>(mappedAddr);
@@ -518,9 +550,9 @@ void ObjectRepository::_fetchFromFile(SharedObject *object, int fd) {
 						MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0, &map_pointer))
 					__ensure(!"sys_vm_map failed");
 
-				seekOrDie(fd, phdr->p_offset);
-				readExactlyOrDie(fd, reinterpret_cast<char *>(map_address) + misalign,
-						phdr->p_filesz);
+				__ensure(trySeek(fd, phdr->p_offset));
+				__ensure(tryReadExactly(fd, reinterpret_cast<char *>(map_address) + misalign,
+						phdr->p_filesz));
 			#endif
 			// Take care of removing superfluous permissions.
 			if(mlibc::sys_vm_protect && ((prot & PROT_WRITE) == 0))
@@ -547,6 +579,8 @@ void ObjectRepository::_fetchFromFile(SharedObject *object, int fd) {
 					<< frg::hex_fmt(phdr->p_type) << " in DSO " << object->name << frg::endlog;
 		}
 	}
+
+	return frg::success;
 }
 
 // --------------------------------------------------------
@@ -681,9 +715,9 @@ void ObjectRepository::_parseDynamic(SharedObject *object) {
 			object->preInitArraySize = dynamic->d_un.d_val;
 			break;
 		case DT_DEBUG:
-#if ELF_CLASS == 32
+#if ELF_CLASS == ELFCLASS32
 			dynamic->d_un.d_val = reinterpret_cast<Elf32_Word>(&globalDebugInterface);
-#elif ELF_CLASS == 64
+#elif ELF_CLASS == ELFCLASS64
 			dynamic->d_un.d_val = reinterpret_cast<Elf64_Xword>(&globalDebugInterface);
 #endif
 			break;
@@ -726,6 +760,24 @@ void ObjectRepository::_parseDynamic(SharedObject *object) {
 
 void ObjectRepository::_discoverDependencies(SharedObject *object,
 		Scope *localScope, uint64_t rts) {
+	if(object->isMainObject) {
+		for(auto preload : *preloads) {
+			frg::expected<LinkerError, SharedObject *> libraryResult;
+			if (preload.find_first('/') == size_t(-1)) {
+				libraryResult = requestObjectWithName(preload, object, globalScope.get(), false, 1);
+			} else {
+				libraryResult = requestObjectAtPath(preload, globalScope.get(), false, 1);
+			}
+			if(!libraryResult)
+				mlibc::panicLogger() << "rtdl: Could not load preload " << preload << frg::endlog;
+
+			if(verbose)
+				mlibc::infoLogger() << "rtdl: Preloading " << preload << frg::endlog;
+
+			object->dependencies.push_back(libraryResult.value());
+		}
+	}
+
 	// Load required dynamic libraries.
 	for(size_t i = 0; object->dynamic[i].d_tag != DT_NULL; i++) {
 		elf_dyn *dynamic = &object->dynamic[i];
@@ -739,7 +791,7 @@ void ObjectRepository::_discoverDependencies(SharedObject *object,
 				object, localScope, false, rts);
 		if(!library)
 			mlibc::panicLogger() << "Could not satisfy dependency " << library_str << frg::endlog;
-		object->dependencies.push(library);
+		object->dependencies.push(library.value());
 	}
 }
 
@@ -775,43 +827,46 @@ SharedObject::SharedObject(const char *name, const char *path,
 			frg::string<MemoryAllocator> { path, getAllocator() },
 			is_main_object, localScope, object_rts) {}
 
-void processCopyRela(SharedObject *object, elf_rela *reloc) {
-	auto type = ELF_R_TYPE(reloc->r_info);
-	auto symbol_index = ELF_R_SYM(reloc->r_info);
+void processLateRelocation(Relocation rel) {
+	// resolve the symbol if there is a symbol
+	frg::optional<ObjectSymbol> p;
+	if(rel.symbol_index()) {
+		auto symbol = (elf_sym *)(rel.object()->baseAddress + rel.object()->symbolTableOffset
+				+ rel.symbol_index() * sizeof(elf_sym));
+		ObjectSymbol r(rel.object(), symbol);
 
-	if(type != R_COPY)
-		return;
+		p = Scope::resolveGlobalOrLocal(*globalScope, rel.object()->localScope,
+				r.getString(), rel.object()->objectRts, Scope::resolveCopy);
+	}
 
-	uintptr_t rel_addr = object->baseAddress + reloc->r_offset;
+	switch(rel.type()) {
+	case R_COPY:
+		__ensure(p);
+		memcpy(rel.destination(), (void *)p->virtualAddress(), p->symbol()->st_size);
+		break;
 
-	auto symbol = (elf_sym *)(object->baseAddress + object->symbolTableOffset
-			+ symbol_index * sizeof(elf_sym));
-	ObjectSymbol r(object, symbol);
-	frg::optional<ObjectSymbol> p = Scope::resolveGlobalOrLocal(*globalScope, object->localScope, r.getString(), object->objectRts, Scope::resolveCopy);
-	__ensure(p);
+// TODO: R_IRELATIVE also exists on other architectures but will likely need a different implementation.
+#if defined(__x86_64__) || defined(__i386__)
+	case R_IRELATIVE: {
+		uintptr_t addr = rel.object()->baseAddress + rel.addend_rel();
+		auto* fn = reinterpret_cast<uintptr_t (*)()>(addr);
+		rel.relocate(fn());
+	} break;
+#elif defined(__aarch64__)
+	case R_IRELATIVE: {
+		uintptr_t addr = rel.object()->baseAddress + rel.addend_rel();
+		auto* fn = reinterpret_cast<uintptr_t (*)(uint64_t)>(addr);
+		// TODO: the function should get passed AT_HWCAP value.
+		rel.relocate(fn(0));
+	} break;
+#endif
 
-	memcpy((void *)rel_addr, (void *)p->virtualAddress(), symbol->st_size);
+	default:
+		break;
+	}
 }
 
-void processCopyRel(SharedObject *object, elf_rel *reloc) {
-	auto type = ELF_R_TYPE(reloc->r_info);
-	auto symbol_index = ELF_R_SYM(reloc->r_info);
-
-	if(type != R_COPY)
-		return;
-
-	uintptr_t rel_addr = object->baseAddress + reloc->r_offset;
-
-	auto symbol = (elf_sym *)(object->baseAddress + object->symbolTableOffset
-			+ symbol_index * sizeof(elf_sym));
-	ObjectSymbol r(object, symbol);
-	frg::optional<ObjectSymbol> p = Scope::resolveGlobalOrLocal(*globalScope, object->localScope, r.getString(), object->objectRts, Scope::resolveCopy);
-	__ensure(p);
-
-	memcpy((void *)rel_addr, (void *)p->virtualAddress(), symbol->st_size);
-}
-
-void processCopyRelocations(SharedObject *object) {
+void processLateRelocations(SharedObject *object) {
 	frg::optional<uintptr_t> rel_offset;
 	frg::optional<size_t> rel_length;
 
@@ -846,12 +901,14 @@ void processCopyRelocations(SharedObject *object) {
 	if(rela_offset && rela_length) {
 		for(size_t offset = 0; offset < *rela_length; offset += sizeof(elf_rela)) {
 			auto reloc = (elf_rela *)(object->baseAddress + *rela_offset + offset);
-			processCopyRela(object, reloc);
+			auto r = Relocation(object, reloc);
+			processLateRelocation(r);
 		}
 	} else if(rel_offset && rel_length) {
 		for(size_t offset = 0; offset < *rel_length; offset += sizeof(elf_rel)) {
 			auto reloc = (elf_rel *)(object->baseAddress + *rel_offset + offset);
-			processCopyRel(object, reloc);
+			auto r = Relocation(object, reloc);
+			processLateRelocation(r);
 		}
 	}else{
 		__ensure(!rela_offset && !rela_length);
@@ -1314,7 +1371,7 @@ void Loader::linkObjects(SharedObject *root) {
 		if(object->dynamic == nullptr)
 			continue;
 
-		processCopyRelocations(object);
+		processLateRelocations(object);
 	}
 
 	for(auto object : _linkBfs) {
@@ -1475,8 +1532,8 @@ void Loader::_scheduleInit(SharedObject *object) {
 }
 
 void Loader::_processRelocations(Relocation &rel) {
-	// copy relocations have to be performed after all other relocations
-	if(rel.type() == R_COPY)
+	// copy and irelative relocations have to be performed after all other relocations
+	if(rel.type() == R_COPY || rel.type() == R_IRELATIVE)
 		return;
 
 	// resolve the symbol if there is a symbol

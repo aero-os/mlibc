@@ -7,6 +7,13 @@
 #include <abi-bits/uid_t.h>
 #include <bits/size_t.h>
 
+#define POLL_IN 1
+#define POLL_OUT 2
+#define POLL_MSG 3
+#define POLL_ERR 4
+#define POLL_PRI 5
+#define POLL_HUP 6
+
 union sigval {
 	int sival_int;
 	void *sival_ptr;
@@ -162,6 +169,7 @@ typedef struct __stack {
 #define SIGEV_SIGNAL 0
 #define SIGEV_NONE 1
 #define SIGEV_THREAD 2
+#define SIGEV_THREAD_ID 4
 
 #define SEGV_MAPERR 1
 #define SEGV_ACCERR 2
@@ -242,12 +250,15 @@ typedef struct __stack {
 #define NGREG 23
 #endif
 
+#include <bits/threads.h>
+
 struct sigevent {
 	union sigval sigev_value;
 	int sigev_notify;
 	int sigev_signo;
 	void (*sigev_notify_function)(union sigval);
-	// MISSING: sigev_notify_attributes
+	struct __mlibc_threadattr *sigev_notify_attributes;
+	pid_t sigev_notify_thread_id;
 };
 
 struct sigaction {

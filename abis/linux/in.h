@@ -4,6 +4,7 @@
 #include <bits/posix/in_addr_t.h>
 #include <bits/posix/in_port_t.h>
 #include <abi-bits/socket.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -158,6 +159,8 @@ struct group_source_req {
 #define IP_MULTICAST_LOOP 34
 #define IP_ADD_MEMBERSHIP 35
 #define IP_DROP_MEMBERSHIP 36
+#define IP_UNBLOCK_SOURCE 37
+#define IP_BLOCK_SOURCE 38
 #define IP_ADD_SOURCE_MEMBERSHIP 39
 #define IP_DROP_SOURCE_MEMBERSHIP 40
 #define IP_UNICAST_IF 50
@@ -177,6 +180,9 @@ struct group_source_req {
 #define IPV6_RECVHOPLIMIT 51
 #define IPV6_HOPLIMIT 52
 
+#define IPV6_RECVTCLASS	66
+#define IPV6_TCLASS 67
+
 #define IPV6_ADD_MEMBERSHIP IPV6_JOIN_GROUP
 #define IPV6_DROP_MEMBERSHIP IPV6_LEAVE_GROUP
 
@@ -187,6 +193,8 @@ struct group_source_req {
 #define IP_PMTUDISC_INTERFACE 4
 #define IP_PMTUDISC_OMIT 5
 
+#define MCAST_BLOCK_SOURCE 43
+#define MCAST_UNBLOCK_SOURCE 44
 #define MCAST_JOIN_SOURCE_GROUP 46
 #define MCAST_LEAVE_SOURCE_GROUP 47
 

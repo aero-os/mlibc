@@ -37,7 +37,6 @@ libc_sources += files(
 	'generic/sys-select-stubs.cpp',
 	'generic/sys-shm.cpp',
 	'generic/sys-socket-stubs.cpp',
-	'generic/sys-statfs-stubs.cpp',
 	'generic/sys-stat-stubs.cpp',
 	'generic/sys-statvfs-stubs.cpp',
 	'generic/sys-times.cpp',
@@ -69,6 +68,7 @@ if not headers_only
 		'musl-generic-regex/tre-mem.c',
 		pic: true,
 		include_directories: libc_include_dirs,
+		dependencies: libc_deps,
 		c_args: ['-Wno-unused', '-Wno-implicit', '-Wno-parentheses', '-Wno-sign-compare', '-Wno-attributes', '-Wno-unknown-pragmas', '-Wno-implicit-fallthrough']
 	)
 endif
@@ -121,6 +121,7 @@ if not no_headers
 		'include/netinet/if_ether.h',
 		'include/netinet/udp.h',
 		'include/netinet/ip6.h',
+		'include/netinet/ip_icmp.h',
 		subdir: 'netinet'
 	)
 	install_headers(
@@ -135,7 +136,6 @@ if not no_headers
 		'include/sys/sem.h',
 		'include/sys/shm.h',
 		'include/sys/socket.h',
-		'include/sys/statfs.h',
 		'include/sys/stat.h',
 		'include/sys/statvfs.h',
 		'include/sys/termios.h',
@@ -146,7 +146,6 @@ if not no_headers
 		'include/sys/uio.h',
 		'include/sys/un.h',
 		'include/sys/utsname.h',
-		'include/sys/vfs.h',
 		'include/sys/wait.h',
 		'include/sys/syslog.h',
 		subdir: 'sys'

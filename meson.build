@@ -43,6 +43,12 @@ internal_conf = configuration_data()
 mlibc_conf = configuration_data()
 
 if not headers_only
+	cshim_dep = dependency('cshim',
+				required: false,
+				fallback: ['cshim', 'cshim_dep'])
+	libc_deps += cshim_dep
+	rtdl_deps += cshim_dep
+
 	cxxshim_dep = dependency('cxxshim',
 				 required: false,
 				 fallback: ['cxxshim', 'cxxshim_dep'])
@@ -62,89 +68,93 @@ if not headers_only
 	cpp_compiler = meson.get_compiler('cpp')
 
 	add_project_arguments('-Wno-unused-function', '-D__MLIBC_BUILDING_MLIBC', language: ['c', 'cpp'])
-	add_project_arguments('-nostdinc', '-fno-builtin', language: ['c', 'cpp'])
+	add_project_arguments('-nostdinc', '-fno-builtin', '-ffreestanding', language: ['c', 'cpp'])
 	add_project_arguments('-Werror=misleading-indentation', language: ['c', 'cpp'])
 	add_project_arguments('-fno-rtti', '-fno-exceptions', language: 'cpp')
 	add_project_link_arguments('-nostdlib', language: ['c', 'cpp'])
 
-	searchdirs = run_command(c_compiler.cmd_array(), '-print-search-dirs',
-				check: true).stdout()
-	searchdirs_arr = searchdirs.split('\n')
-	searchline = 'install: '
-	ccdir = ''
-	if c_compiler.get_id() == 'clang'
-		searchline = 'libraries: ='
-	endif
-
-	foreach line : searchdirs_arr
-		if line.startswith(searchline)
-			ccdir = line.strip(searchline)
-			ccdir = ccdir.split(':')[0]
-			break
+	if not cshim_dep.found()
+		searchdirs = run_command(c_compiler.cmd_array(), '-print-search-dirs',
+					check: true).stdout()
+		searchdirs_arr = searchdirs.split('\n')
+		searchline = 'install: '
+		ccdir = ''
+		if c_compiler.get_id() == 'clang'
+			searchline = 'libraries: ='
 		endif
-	endforeach
 
-	if ccdir == ''
-		error('could not find compiler-specific header directory')
-	endif
-
-	if c_compiler.get_id() == 'gcc' and fs.exists(ccdir / 'include-fixed')
-		rtdl_include_dirs += include_directories(ccdir / 'include-fixed')
-		libc_include_dirs += include_directories(ccdir / 'include-fixed')
-	endif
-
-	rtdl_include_dirs += include_directories(ccdir / 'include')
-	libc_include_dirs += include_directories(ccdir / 'include')
-
-	cplusplus_include_path = []
-
-	c_output = run_command(c_compiler.cmd_array(), '-E', '-v', '-x', 'c',
-			       '/dev/null', '-o', '-',
-			       capture: true,
-			       check: true).stderr().split('\n')
-
-	cpp_output = run_command(cpp_compiler.cmd_array(), '-E', '-v', '-x',
-				 'c++', '/dev/null', '-o', '-',
-				 capture: true,
-				 check: true).stderr().split('\n')
-
-	c_relevant_lines = []
-
-	relevantmarker = '#include <...>'
-	relevant_started = false
-
-	foreach line : c_output
-		if relevant_started
-			if not line.startswith(' ')
+		foreach line : searchdirs_arr
+			if line.startswith(searchline)
+				ccdir = line.strip(searchline)
+				ccdir = ccdir.split(':')[0]
 				break
 			endif
-			c_relevant_lines += line.strip()
-		elif line.startswith(relevantmarker)
-			relevant_started = true
+		endforeach
+
+		if ccdir == ''
+			error('could not find compiler-specific header directory')
 		endif
-	endforeach
 
-	relevant_started = false
-
-	foreach line : cpp_output
-		if relevant_started
-			if not line.startswith(' ')
-				break
-			endif
-			debug('maybe relevant', line)
-			stripped = line.strip()
-			if stripped in c_relevant_lines
-				debug('not relevant (is C)', line)
-				continue
-			endif
-			cplusplus_include_path += include_directories(stripped)
-		elif line.startswith(relevantmarker)
-			relevant_started = true
+		if c_compiler.get_id() == 'gcc' and fs.exists(ccdir / 'include-fixed')
+			rtdl_include_dirs += include_directories(ccdir / 'include-fixed')
+			libc_include_dirs += include_directories(ccdir / 'include-fixed')
 		endif
-	endforeach
 
-	rtdl_include_dirs += cplusplus_include_path
-	libc_include_dirs += cplusplus_include_path
+		rtdl_include_dirs += include_directories(ccdir / 'include')
+		libc_include_dirs += include_directories(ccdir / 'include')
+	endif
+
+	if not cxxshim_dep.found()
+		cplusplus_include_path = []
+
+		c_output = run_command(c_compiler.cmd_array(), '-E', '-v', '-x', 'c',
+					'/dev/null', '-o', '-',
+					capture: true,
+					check: true).stderr().split('\n')
+
+		cpp_output = run_command(cpp_compiler.cmd_array(), '-E', '-v', '-x',
+					'c++', '/dev/null', '-o', '-',
+					capture: true,
+					check: true).stderr().split('\n')
+
+		c_relevant_lines = []
+
+		relevantmarker = '#include <...>'
+		relevant_started = false
+
+		foreach line : c_output
+			if relevant_started
+				if not line.startswith(' ')
+					break
+				endif
+				c_relevant_lines += line.strip()
+			elif line.startswith(relevantmarker)
+				relevant_started = true
+			endif
+		endforeach
+
+		relevant_started = false
+
+		foreach line : cpp_output
+			if relevant_started
+				if not line.startswith(' ')
+					break
+				endif
+				debug('maybe relevant', line)
+				stripped = line.strip()
+				if stripped in c_relevant_lines
+					debug('not relevant (is C)', line)
+					continue
+				endif
+				cplusplus_include_path += include_directories(stripped)
+			elif line.startswith(relevantmarker)
+				relevant_started = true
+			endif
+		endforeach
+
+		rtdl_include_dirs += cplusplus_include_path
+		libc_include_dirs += cplusplus_include_path
+	endif
 endif
 
 internal_conf.set_quoted('MLIBC_SYSTEM_NAME', host_machine.system())
@@ -191,6 +201,7 @@ elif host_machine.system() == 'managarm'
 	rtdl_include_dirs += include_directories('sysdeps/managarm/include')
 	libc_include_dirs += include_directories('sysdeps/managarm/include')
 	internal_conf.set10('MLIBC_MAP_DSO_SEGMENTS', true)
+	internal_conf.set10('MLIBC_MMAP_ALLOCATE_DSO', true)
 	internal_conf.set10('MLIBC_MAP_FILE_WINDOWS', true)
 	subdir('sysdeps/managarm')
 elif host_machine.system() == 'ironclad'
@@ -410,6 +421,7 @@ if not headers_only
 
 	ld_cpp_args = [
 		'-fvisibility=hidden',
+		'-fvisibility-inlines-hidden',
 		'-fno-stack-protector',
 		'-DMLIBC_BUILDING_RTDL'
 	]
@@ -470,6 +482,8 @@ if not headers_only
 	endif
 	library('resolv', 'dummy-libs/libresolv/src/dummy.cpp', install: true)
 	library('dl', 'dummy-libs/libdl/src/dummy.cpp', install: true)
+	library('ssp', 'dummy-libs/libssp/src/dummy.cpp', install: true)
+	library('ssp_nonshared', 'dummy-libs/libssp_nonshared/src/dummy.cpp', install: true)
 endif
 
 summary_info = {}

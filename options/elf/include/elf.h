@@ -23,6 +23,8 @@ extern "C" {
 #define SHF_INFO_LINK 64
 #define SHF_TLS 1024
 
+#define NT_AUXV 6
+
 typedef uint64_t Elf64_Addr;
 typedef uint64_t Elf64_Off;
 typedef uint16_t Elf64_Half;
@@ -572,12 +574,13 @@ typedef struct {
 #define EM_PPC64		21
 #define EM_S390			22
 #define EM_ARM			40
-#define EM_SH				42
-#define EM_SPARCV9	43
+#define EM_SH			42
+#define EM_SPARCV9		43
 #define EM_IA_64		50
 #define EM_X86_64		62
-#define EM_BLACKFIN	106
-#define EM_AARCH64	183
+#define EM_BLACKFIN		106
+#define EM_AARCH64		183
+#define EM_RISCV		243
 
 /* Linux notes this value as being interim; however applications are using this (Qt6), so we define it here. */
 #define EM_ALPHA		0x9026

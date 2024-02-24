@@ -3,6 +3,7 @@
 #include <link.h>
 
 #include <frg/manual_box.hpp>
+#include <frg/small_vector.hpp>
 
 #include <abi-bits/auxv.h>
 #include <mlibc/debug.hpp>
@@ -46,6 +47,11 @@ frg::manual_box<ObjectRepository> initialRepository;
 frg::manual_box<Scope> globalScope;
 
 frg::manual_box<RuntimeTlsMap> runtimeTlsMap;
+
+// We use a small vector of size 4 to avoid memory allocation for the default library paths
+frg::manual_box<frg::small_vector<frg::string_view, 4, MemoryAllocator>> libraryPaths;
+
+frg::manual_box<frg::vector<frg::string_view, MemoryAllocator>> preloads;
 
 static SharedObject *executableSO;
 extern HIDDEN char __ehdr_start[];
@@ -163,7 +169,7 @@ extern "C" void *lazyRelocate(SharedObject *object, unsigned int rel_index) {
 	auto symbol_index = ELF_R_SYM(reloc->r_info);
 
 	__ensure(type == R_X86_64_JUMP_SLOT);
-	__ensure(ELF_CLASS == 64);
+	__ensure(ELF_CLASS == ELFCLASS64);
 
 	auto symbol = (elf_sym *)(object->baseAddress + object->symbolTableOffset
 			+ symbol_index * sizeof(elf_sym));
@@ -199,11 +205,47 @@ extern "C" [[gnu::alias("dl_debug_state"), gnu::visibility("default")]] void _dl
 // This symbol can be used by GDB to find the global interface structure
 [[ gnu::visibility("default") ]] DebugInterface *_dl_debug_addr = &globalDebugInterface;
 
+static frg::vector<frg::string_view, MemoryAllocator> parseList(frg::string_view paths, frg::string_view separators) {
+	frg::vector<frg::string_view, MemoryAllocator> list{getAllocator()};
+
+	size_t p = 0;
+	while(p < paths.size()) {
+		size_t s; // Offset of next colon or end of string.
+		if(size_t cs = paths.find_first_of(separators, p); cs != size_t(-1)) {
+			s = cs;
+		}else{
+			s = paths.size();
+		}
+
+		auto path = paths.sub_string(p, s - p);
+		p = s + 1;
+
+		if(path.size() == 0)
+			continue;
+
+		if(path.ends_with("/")) {
+			size_t i = path.size() - 1;
+			while(i > 0 && path[i] == '/')
+				i--;
+			path = path.sub_string(0, i + 1);
+		}
+
+		if(path == "/")
+			path = "";
+
+		list.push_back(path);
+	}
+
+	return list;
+}
+
 extern "C" void *interpreterMain(uintptr_t *entry_stack) {
 	if(logEntryExit)
 		mlibc::infoLogger() << "Entering ld.so" << frg::endlog;
 	entryStack = entry_stack;
 	runtimeTlsMap.initialize();
+	libraryPaths.initialize(getAllocator());
+	preloads.initialize(getAllocator());
 
 	void *phdr_pointer = 0;
 	size_t phdr_entry_size = 0;
@@ -282,15 +324,27 @@ extern "C" void *interpreterMain(uintptr_t *entry_stack) {
 		if(s == size_t(-1))
 			mlibc::panicLogger() << "rtdl: environment '" << env << "' is missing a '='" << frg::endlog;
 
+		auto name = view.sub_string(0, s);
 		auto value = const_cast<char *>(view.data() + s + 1);
 
-		if(view.sub_string(0, s) == "LD_SHOW_AUXV" && value && *value && *value != '0') {
+		if(name == "LD_SHOW_AUXV" && *value && *value != '0') {
 			ldShowAuxv = true;
+		}else if(name == "LD_LIBRARY_PATH" && *value) {
+			for(auto path : parseList(value, ":;"))
+				libraryPaths->push_back(path);
+		}else if(name == "LD_PRELOAD" && *value) {
+			*preloads = parseList(value, " :");
 		}
 
 		aux++;
 	}
 	aux++;
+
+	// Add default library paths
+	libraryPaths->push_back("/lib");
+	libraryPaths->push_back("/lib64");
+	libraryPaths->push_back("/usr/lib");
+	libraryPaths->push_back("/usr/lib64");
 
 	// Parse the actual vector.
 	while(true) {
@@ -499,6 +553,7 @@ void *__dlapi_open(const char *file, int flags, void *returnAddress) {
 		bool isGlobal = flags & RTLD_GLOBAL;
 		Scope *newScope = isGlobal ? globalScope.get() : nullptr;
 
+		frg::expected<LinkerError, SharedObject *> objectResult;
 		if (frg::string_view{file}.find_first('/') == size_t(-1)) {
 			// In order to know which RUNPATH / RPATH to process, we must find the calling object.
 			SharedObject *origin = initialRepository->findCaller(returnAddress);
@@ -507,15 +562,37 @@ void *__dlapi_open(const char *file, int flags, void *returnAddress) {
 					<< "(ra = " << returnAddress << ")" << frg::endlog;
 			}
 
-			object = initialRepository->requestObjectWithName(file, origin, newScope, !isGlobal, rts);
+			objectResult = initialRepository->requestObjectWithName(file, origin, newScope, !isGlobal, rts);
 		} else {
-			object = initialRepository->requestObjectAtPath(file, newScope, !isGlobal, rts);
+			objectResult = initialRepository->requestObjectAtPath(file, newScope, !isGlobal, rts);
 		}
 
-		if(!object) {
-			lastError = "Cannot locate requested DSO";
+		if(!objectResult) {
+			switch (objectResult.error()) {
+			case LinkerError::success:
+				__builtin_unreachable();
+			case LinkerError::notFound:
+				lastError = "Cannot locate requested DSO";
+				break;
+			case LinkerError::fileTooShort:
+				lastError = "File too short";
+				break;
+			case LinkerError::notElf:
+				lastError = "File is not an ELF file";
+				break;
+			case LinkerError::wrongElfType:
+				lastError = "File has wrong ELF type";
+				break;
+			case LinkerError::outOfMemory:
+				lastError = "Out of memory";
+				break;
+			case LinkerError::invalidProgramHeader:
+				lastError = "File has invalid program header";
+				break;
+			}
 			return nullptr;
 		}
+		object = objectResult.value();
 
 		Loader linker{object->localScope, nullptr, false, rts};
 		linker.linkObjects(object);

@@ -22,8 +22,8 @@
 #include <sys/select.h>
 #include <sys/sem.h>
 #include <sys/statvfs.h>
-#include <sys/statfs.h>
 #include <sys/time.h>
+#include <sys/times.h>
 #include <sys/wait.h>
 #include <sched.h>
 #include <termios.h>
@@ -191,8 +191,6 @@ int sys_vm_unmap(void *pointer, size_t size);
 [[gnu::weak]] int sys_sigsuspend(const sigset_t *set);
 [[gnu::weak]] int sys_sigpending(sigset_t *set);
 [[gnu::weak]] int sys_setgroups(size_t size, const gid_t *list);
-[[gnu::weak]] int sys_statfs(const char *path, struct statfs *buf);
-[[gnu::weak]] int sys_fstatfs(int fd, struct statfs *buf);
 [[gnu::weak]] int sys_memfd_create(const char *name, int flags, int *fd);
 [[gnu::weak]] int sys_madvise(void *addr, size_t length, int advice);
 [[gnu::weak]] int sys_msync(void *addr, size_t length, int flags);
@@ -234,6 +232,8 @@ int sys_vm_unmap(void *pointer, size_t size);
 
 [[gnu::weak]] int sys_setaffinity(pid_t pid, size_t cpusetsize, const cpu_set_t *mask);
 [[gnu::weak]] int sys_setthreadaffinity(pid_t tid, size_t cpusetsize, const cpu_set_t *mask);
+
+[[gnu::weak]] int sys_waitid(idtype_t idtype, id_t id, siginfo_t *info, int options);
 
 } //namespace mlibc
 
